@@ -1,0 +1,1 @@
+{"topic": "order-created", "partition": 0, "offset": 11132, "kafka_timestamp": 1790776664388, "ingested_at": "2026-09-30T13:57:44.404856+00:00", "payload": {"id": "3b6de2c6-0d2a-4487-a781-935df1585eed", "status": "pending", "customer_id": "9542ed81-e5db-4f64-88e2-98512dbef2b9", "total_amount": "32.43"}}
