@@ -30,3 +30,8 @@ output "athena_workgroup" {
 output "glue_role_arn" {
   value = aws_iam_role.glue.arn
 }
+
+output "bronze_to_silver_job" {
+  description = "Start it with: aws glue start-job-run --job-name <this>"
+  value       = aws_glue_job.bronze_to_silver.name
+}
