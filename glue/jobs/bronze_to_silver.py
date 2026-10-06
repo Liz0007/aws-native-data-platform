@@ -251,16 +251,37 @@ def dedupe(df: DataFrame) -> DataFrame:
     with a later ingested_at, so that column varies between duplicates even
     though the event itself is the same.
 
-    The earliest ingested_at wins: it records when the platform first
-    observed the event, which is the more useful fact and is stable under
-    reprocessing. Remaining ties mean the rows are genuinely identical, so
-    any choice among them is the same choice.
+    Ordering, in priority:
+
+    1. Earliest ingested_at — when the platform first observed the event,
+       the more useful fact, and stable under reprocessing. Nulls sort last,
+       so a row whose ingested_at failed to parse never beats one that
+       parsed. (Spark sorts nulls first in ascending order by default.)
+
+    2. A hash of the row's full content, as a tie-breaker. Two copies with
+       the same ingested_at but different values should be impossible: a
+       Kafka message at a given (partition, offset) is immutable. But that
+       is a property of the upstream system, not something this job checks,
+       and without a tie-breaker such a pair would be resolved by Spark's
+       scheduling. Ordering by content makes the choice a function of the
+       data alone. Rows that are identical hash identically, and then which
+       one is kept genuinely does not matter.
     """
-    ranked = Window.partitionBy(*MERGE_KEYS).orderBy(F.col("ingested_at").asc())
+    # Hashes every column deliberately. Key columns, topic and event_date are
+    # constant within a group, and ingested_at is already tied by the time
+    # this is consulted, so including them is harmless. Excluding any column
+    # that could differ would let two rows tie on the hash too.
+    content_hash = F.sha2(F.to_json(F.struct(*[F.col(c) for c in df.columns])), 256)
+
+    ranked = Window.partitionBy(*MERGE_KEYS).orderBy(
+        F.col("ingested_at").asc_nulls_last(),
+        F.col("_content_hash").asc(),
+    )
     return (
-        df.withColumn("_rank", F.row_number().over(ranked))
+        df.withColumn("_content_hash", content_hash)
+        .withColumn("_rank", F.row_number().over(ranked))
         .filter(F.col("_rank") == 1)
-        .drop("_rank")
+        .drop("_rank", "_content_hash")
     )
 
 
@@ -473,8 +494,8 @@ def merge_sql(table: str, columns: list[str]) -> str:
     payload = [c for c in columns if c not in keys]
 
     on = " AND ".join(f"t.{k} = s.{k}" for k in keys)
-    insert_cols_only = ", ".join(columns)
-    insert_vals_only = ", ".join(f"s.{c}" for c in columns)
+    insert_cols = ", ".join(columns)
+    insert_vals = ", ".join(f"s.{c}" for c in columns)
 
     if not payload:
         # Nothing outside the key to compare or assign: an empty MATCHED
@@ -484,13 +505,11 @@ def merge_sql(table: str, columns: list[str]) -> str:
         MERGE INTO {table} t
         USING updates s
         ON {on}
-        WHEN NOT MATCHED THEN INSERT ({insert_cols_only}) VALUES ({insert_vals_only})
+        WHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals})
     """
 
     changed = " OR ".join(f"NOT (t.{c} <=> s.{c})" for c in payload)
     assignments = ", ".join(f"t.{c} = s.{c}" for c in payload)
-    insert_cols = ", ".join(columns)
-    insert_vals = ", ".join(f"s.{c}" for c in columns)
 
     return f"""
         MERGE INTO {table} t
@@ -580,8 +599,15 @@ def compact(spark: SparkSession, table: str) -> None:
 
 
 def file_count(spark: SparkSession, table: str) -> int:
-    """Data files currently in the table, from Iceberg's own metadata."""
-    return spark.sql(f"SELECT count(*) AS n FROM {table}.files").collect()[0]["n"]
+    """Data files currently in the table, from Iceberg's own metadata.
+
+    Reads the data_files metadata table rather than files: files also lists
+    delete files (it has a content column telling them apart), so on a table
+    another writer has applied row-level deletes to, it would count data and
+    delete files together and inflate the before/after figures that
+    compaction is meant to show.
+    """
+    return spark.sql(f"SELECT count(*) AS n FROM {table}.data_files").collect()[0]["n"]
 
 
 def main() -> None:
