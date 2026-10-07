@@ -1,0 +1,68 @@
+version: 2
+
+# The silver tables written by the Glue job. Tests here are the contract
+# gold depends on — checked at the boundary before any mart is built,
+# because `dbt build` runs source tests first.
+#
+# The Glue job already enforces per-row validity. These tests add what a
+# per-row check cannot see: uniqueness and relationships across tables.
+
+sources:
+  - name: silver
+    database: awsdatacatalog
+    schema: "{{ env_var('SILVER_SCHEMA', 'ecom_analytics_demo_silver') }}"
+    tables:
+      - name: silver_order_created
+        description: One row per order-created event.
+        columns:
+          - name: order_id
+            description: >
+              Unique per table. Silver deduplicates on (partition, offset),
+              which catches redelivery of the same message — but not the
+              same order emitted twice at different offsets. This test is
+              what catches that.
+            tests: [unique, not_null]
+
+      - name: silver_payment_processed
+        columns:
+          - name: order_id
+            tests:
+              - unique
+              - not_null
+              - relationships:
+                  arguments:
+                    to: source('silver', 'silver_order_created')
+                    field: order_id
+
+      - name: silver_inventory_reserved
+        columns:
+          - name: order_id
+            tests:
+              - unique
+              - not_null
+              - relationships:
+                  arguments:
+                    to: source('silver', 'silver_order_created')
+                    field: order_id
+
+      - name: silver_order_confirmed
+        columns:
+          - name: order_id
+            tests:
+              - unique
+              - not_null
+              - relationships:
+                  arguments:
+                    to: source('silver', 'silver_order_created')
+                    field: order_id
+
+      - name: silver_order_cancelled
+        columns:
+          - name: order_id
+            tests:
+              - unique
+              - not_null
+              - relationships:
+                  arguments:
+                    to: source('silver', 'silver_order_created')
+                    field: order_id

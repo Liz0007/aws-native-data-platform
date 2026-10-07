@@ -1,0 +1,30 @@
+version: 2
+
+models:
+  - name: fct_orders
+    description: One row per order across its whole lifecycle.
+    columns:
+      - name: order_id
+        tests: [unique, not_null]
+      - name: outcome
+        tests:
+          - accepted_values:
+              arguments:
+                values: [confirmed, cancelled, pending]
+      - name: total_amount
+        tests: [not_null]
+
+  - name: daily_order_metrics
+    description: Order volume, outcomes and revenue by day.
+    columns:
+      - name: order_date
+        tests: [unique, not_null]
+
+  - name: payment_failure_reasons
+    description: Payment failures by reason and method, with lost order value.
+
+  - name: stock_held_for_cancelled_orders
+    description: Cancelled orders that nonetheless had stock reserved.
+    columns:
+      - name: order_id
+        tests: [unique, not_null]

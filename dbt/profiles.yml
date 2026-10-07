@@ -1,0 +1,23 @@
+# dbt-athena connection. Contains no credentials: authentication uses the
+# standard AWS credential chain (the same profile the AWS CLI uses), so this
+# file is safe to commit. Bucket-specific values come from environment
+# variables that scripts/run_dbt.sh fills from `terraform output`.
+ecom_analytics:
+  target: dev
+  outputs:
+    dev:
+      type: athena
+      region_name: "{{ env_var('AWS_REGION', 'eu-south-2') }}"
+      database: awsdatacatalog
+      # Gold tables are created in this Glue database.
+      schema: "{{ env_var('DBT_GOLD_SCHEMA', 'ecom_analytics_demo_gold') }}"
+      work_group: "{{ env_var('DBT_ATHENA_WORKGROUP', 'ecom-analytics-demo') }}"
+      # Where Athena writes query results. The workgroup enforces its own
+      # location, so this is a fallback rather than the effective setting.
+      s3_staging_dir: "{{ env_var('DBT_S3_STAGING_DIR') }}"
+      # Root for gold table data.
+      s3_data_dir: "{{ env_var('DBT_S3_DATA_DIR') }}"
+      # A unique suffix per build, so rebuilding a table never collides
+      # with the files of the version it replaces.
+      s3_data_naming: schema_table_unique
+      threads: 4

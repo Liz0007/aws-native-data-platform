@@ -1,0 +1,29 @@
+name: ecom_analytics
+version: "1.0.0"
+config-version: 2
+profile: ecom_analytics
+
+model-paths: ["models"]
+test-paths: ["tests"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages", "logs"]
+
+models:
+  ecom_analytics:
+    # Staging models compile into CTEs inside the marts that use them, so
+    # the gold database holds only finished tables — no intermediate views
+    # for a BI tool to wander into. The trade-off is that ephemeral models
+    # cannot be tested directly, which is why the contract tests sit on the
+    # silver sources instead (models/sources.yml).
+    staging:
+      +materialized: ephemeral
+
+    # Rebuilt in full on every run, as Iceberg tables. An order changes
+    # state after it first appears (pending, then confirmed or cancelled),
+    # so an incremental filter on creation time would miss those updates.
+    # At this volume a full rebuild takes seconds and is always correct;
+    # incremental merge earns its complexity only once rebuilds get slow.
+    marts:
+      +materialized: table
+      +table_type: iceberg
+      +format: parquet
