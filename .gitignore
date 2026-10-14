@@ -1,0 +1,37 @@
+# One ignore file for the whole repo. Patterns without a slash match at any
+# depth, so these apply to airflow/, lambda/, scripts/, tests/ and dbt/ alike.
+
+# --- secrets and machine-specific config: never commit -----------------------
+.env
+.env.*
+terraform.tfvars
+*.tfstate
+*.tfstate.*
+
+# --- Terraform -----------------------------------------------------------------
+.terraform/
+.terraform.lock.hcl
+*.tfplan
+crash.log
+.build/
+
+# --- Python --------------------------------------------------------------------
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# --- Airflow (local Docker) ----------------------------------------------------
+airflow/logs/
+
+# --- dbt -----------------------------------------------------------------------
+dbt/target/
+dbt/dbt_packages/
+dbt/logs/
+
+# --- OS and editors ------------------------------------------------------------
+.DS_Store
+.idea/
+.vscode/
+scripts/check_payload_schemas.py
