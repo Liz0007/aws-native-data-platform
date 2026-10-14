@@ -4,6 +4,8 @@ terraform {
   required_providers {
     aws    = { source = "hashicorp/aws", version = "~> 5.60" }
     random = { source = "hashicorp/random", version = "~> 3.6" }
+    # Zips the ingestion Lambda from lambda/ingest_validate/.
+    archive = { source = "hashicorp/archive", version = "~> 2.4" }
   }
 }
 

@@ -1,0 +1,157 @@
+{
+  "Comment": "Close a bronze batch: wait for landing/ to drain, refuse if files are quarantined, refresh the catalog, then write the marker Airflow waits for.",
+  "StartAt": "HasMaxQuarantined",
+  "States": {
+    "HasMaxQuarantined": {
+      "Type": "Choice",
+      "Choices": [
+        { "Variable": "$.max_quarantined", "IsPresent": true, "Next": "InitCounters" }
+      ],
+      "Default": "DefaultMaxQuarantined"
+    },
+    "DefaultMaxQuarantined": {
+      "Type": "Pass",
+      "Result": 0,
+      "ResultPath": "$.max_quarantined",
+      "Next": "InitCounters"
+    },
+    "InitCounters": {
+      "Type": "Pass",
+      "Result": { "landing": 0, "crawler": 0 },
+      "ResultPath": "$.polls",
+      "Next": "ListLanding"
+    },
+
+    "ListLanding": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:s3:listObjectsV2",
+      "Parameters": { "Bucket": "${bucket}", "Prefix": "landing/", "MaxKeys": 1 },
+      "ResultSelector": { "KeyCount.$": "$.KeyCount" },
+      "ResultPath": "$.landing_list",
+      "Retry": [
+        { "ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 2, "MaxAttempts": 3, "BackoffRate": 2.0 }
+      ],
+      "Next": "LandingDrained"
+    },
+    "LandingDrained": {
+      "Type": "Choice",
+      "Choices": [
+        { "Variable": "$.landing_list.KeyCount", "NumericEquals": 0, "Next": "ListQuarantine" },
+        { "Variable": "$.polls.landing", "NumericGreaterThanEquals": ${max_landing_polls}, "Next": "LandingNotDrained" }
+      ],
+      "Default": "WaitForRouting"
+    },
+    "WaitForRouting": { "Type": "Wait", "Seconds": 20, "Next": "BumpLandingPolls" },
+    "BumpLandingPolls": {
+      "Type": "Pass",
+      "Parameters": {
+        "max_quarantined.$": "$.max_quarantined",
+        "polls": { "landing.$": "States.MathAdd($.polls.landing, 1)", "crawler.$": "$.polls.crawler" }
+      },
+      "Next": "ListLanding"
+    },
+    "LandingNotDrained": {
+      "Type": "Fail",
+      "Error": "LandingNotDrained",
+      "Cause": "Files were still in landing/ after the polling budget. The ingestion Lambda may be failing: check its logs and its async retry/dead-letter state."
+    },
+
+    "ListQuarantine": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:s3:listObjectsV2",
+      "Parameters": { "Bucket": "${bucket}", "Prefix": "quarantine/", "MaxKeys": 1000 },
+      "ResultSelector": { "KeyCount.$": "$.KeyCount" },
+      "ResultPath": "$.quarantine_list",
+      "Retry": [
+        { "ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 2, "MaxAttempts": 3, "BackoffRate": 2.0 }
+      ],
+      "Next": "QuarantineAcceptable"
+    },
+    "QuarantineAcceptable": {
+      "Type": "Choice",
+      "Choices": [
+        { "Variable": "$.quarantine_list.KeyCount", "NumericGreaterThanPath": "$.max_quarantined", "Next": "QuarantineNotEmpty" }
+      ],
+      "Default": "StartCrawler"
+    },
+    "QuarantineNotEmpty": {
+      "Type": "Fail",
+      "Error": "QuarantineNotEmpty",
+      "Cause": "Files are in quarantine/, above the allowed count. Read quarantine-reasons/, then replay the files into landing/ or delete them, and run the batch again."
+    },
+
+    "StartCrawler": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:glue:startCrawler",
+      "Parameters": { "Name": "${crawler_name}" },
+      "ResultPath": null,
+      "Catch": [
+        { "ErrorEquals": ["Glue.CrawlerRunningException"], "ResultPath": null, "Next": "WaitForCrawler" }
+      ],
+      "Next": "WaitForCrawler"
+    },
+    "WaitForCrawler": { "Type": "Wait", "Seconds": 30, "Next": "GetCrawler" },
+    "GetCrawler": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:glue:getCrawler",
+      "Parameters": { "Name": "${crawler_name}" },
+      "ResultSelector": {
+        "State.$": "$.Crawler.State",
+        "LastStatus.$": "$.Crawler.LastCrawl.Status"
+      },
+      "ResultPath": "$.crawler",
+      "Next": "CrawlerFinished"
+    },
+    "CrawlerFinished": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "And": [
+            { "Variable": "$.crawler.State", "StringEquals": "READY" },
+            { "Variable": "$.crawler.LastStatus", "StringEquals": "SUCCEEDED" }
+          ],
+          "Next": "WriteMarker"
+        },
+        {
+          "And": [
+            { "Variable": "$.crawler.State", "StringEquals": "READY" },
+            { "Not": { "Variable": "$.crawler.LastStatus", "StringEquals": "SUCCEEDED" } }
+          ],
+          "Next": "CrawlerFailed"
+        },
+        { "Variable": "$.polls.crawler", "NumericGreaterThanEquals": ${max_crawler_polls}, "Next": "CrawlerTimedOut" }
+      ],
+      "Default": "BumpCrawlerPolls"
+    },
+    "BumpCrawlerPolls": {
+      "Type": "Pass",
+      "Parameters": {
+        "max_quarantined.$": "$.max_quarantined",
+        "polls": { "landing.$": "$.polls.landing", "crawler.$": "States.MathAdd($.polls.crawler, 1)" }
+      },
+      "Next": "WaitForCrawler"
+    },
+    "CrawlerFailed": {
+      "Type": "Fail",
+      "Error": "CrawlerFailed",
+      "Cause": "The bronze crawler finished without SUCCEEDED. No marker was written, so Airflow will not start."
+    },
+    "CrawlerTimedOut": {
+      "Type": "Fail",
+      "Error": "CrawlerTimedOut",
+      "Cause": "The bronze crawler did not reach READY within the polling budget."
+    },
+
+    "WriteMarker": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:s3:putObject",
+      "Parameters": {
+        "Bucket": "${bucket}",
+        "Key.$": "States.Format('markers/bronze/{}.success', $$.Execution.Name)",
+        "Body.$": "States.JsonToString($$.Execution)"
+      },
+      "ResultPath": null,
+      "End": true
+    }
+  }
+}
