@@ -222,6 +222,10 @@ Airflow runs locally in Docker (LocalExecutor, Postgres metadata), with the UI b
 
 The sensor waits for the ingestion marker. The DAG records which markers exist when it starts and deletes exactly those after dbt succeeds, so a batch closed mid-run is not lost and a failed run keeps its markers. What this does and does not guarantee is spelled out under [Guarantees and limits](#guarantees-and-limits-of-the-marker-handoff). Both DAGs are created paused. A manual run of `ecom_pipeline` succeeded end to end in 3m38s with no retries.
 
+**Marker handoff, observed.** A run triggered with no marker present held at `wait_for_bronze` for 28 minutes, poking once a minute. Closing a batch (`scripts/close_bronze_batch.sh`) wrote a marker, and the sensor passed within a minute. `snapshot_markers` recorded it, Glue (1m58s) and dbt (46s) ran, and `consume_markers` deleted it, leaving `markers/bronze/` empty. Earlier, a scheduled run of the same DAG version had consumed two markers left from the ingestion tests without anyone watching.
+
+![Marker-gated run](docs/airflow-marker-run.png)
+
 **Failure path, observed.** One row with a null `order_id` was placed in bronze. The Glue job reported `order-created: 2825 rows, 1 invalid (0.04%), 7 rules` and raised:
 
 ```
@@ -241,7 +245,8 @@ Airflow resubmitted a fresh Glue run for each retry (four attempts in total), al
 - **Retries converge.** The landing object is deleted last. A failure before that leaves it in `landing/`, so the batch cannot close on it, and the retry ends in the same state as a clean run. This is tested by injecting a failure between a file's two date partitions, after the bronze writes, and after the quarantine copy.
 - **A partial result can be seen briefly.** A file that crosses midnight writes one partition at a time, so the first partition is readable until the retry writes the rest. The batch marker is not written meanwhile, but a direct query of bronze, or a Glue run already in flight, can see the partial state; the next run's merge picks up the remainder.
 - **Different files never overwrite each other in bronze.** Bronze keys do not include the landing date folder, so the handler compares any existing object first and quarantines a file whose bytes differ, writing nothing for any of its dates. Replacing a bronze file on purpose means deleting the old object first. The Lambda role has read access to `bronze/*` for this check.
-- **Not covered:** the collision check is unit-tested only; `test_ingestion.py` has not been extended to exercise it in AWS, because that needs a valid file in bronze. After async retries are exhausted there is no dead-letter queue; the file stays in `landing/` and the batch fails with `LandingNotDrained`.
+- **Verified in AWS, accept side:** after deploying the check, replaying all 296 seed files into `landing/` routed every one (296 `routed` log lines, 0 quarantined, the same 296 bronze keys, rewritten with fresh timestamps). Each replay read the existing bronze object through the new permission and found identical bytes.
+- **Not covered:** the reject side (a *different* file landing on an existing key) is unit-tested only; `test_ingestion.py` has not been extended to exercise it in AWS, because that needs a valid file in bronze. After async retries are exhausted there is no dead-letter queue; the file stays in `landing/` and the batch fails with `LandingNotDrained`.
 
 ### Guarantees and limits of the marker handoff
 
@@ -269,7 +274,6 @@ The production equivalent of this setup would be Amazon MWAA (managed Airflow), 
 - **Extra rows added to silver by hand** are not removed by the job. This is inferred from the code, not tested.
 - **Recovery from a cleared task.** Clearing only `dbt_build` (reusing the snapshot) and clearing `snapshot_markers` (re-listing) should each end with an empty `markers/bronze/`. This follows from the design but has not been run.
 - **Gold is safe to rebuild twice.** Running `dbt build` twice in a row and comparing row counts has not been done.
-- **The marker handoff to Airflow has not yet run live.** The DAG's task order and marker logic are tested with the Airflow imports stubbed; a real run against real markers is still to do.
 - **Quarantine is counted in total, not per batch,** so it must be emptied before the next batch can close.
 - **Airflow runs locally.** Nothing here proves the DAGs on MWAA.
 
@@ -283,7 +287,7 @@ The production equivalent of this setup would be Amazon MWAA (managed Airflow), 
 | dbt: silver → gold, tested, break-and-repair verified | ✅ |
 | Airflow: pipeline and compaction DAGs, failure path observed | ✅ |
 | Ingestion: Lambda validation + Step Functions batch close | ✅ happy and failure paths verified in AWS |
-| Airflow gated on the ingestion marker | 🚧 stub-tested; live run pending |
+| Airflow gated on the ingestion marker | ✅ verified live: blocked without a marker, released on batch close, marker consumed after dbt |
 | Redshift Serverless | ⬜ optional |
 | Offline CI (`terraform validate`, `dbt parse`, rule-test dry run) | ⬜ |
 
